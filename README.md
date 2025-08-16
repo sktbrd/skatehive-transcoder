@@ -1,0 +1,74 @@
+# video-worker (FFmpeg → Pinata)
+
+A tiny API that accepts a file upload, transcodes it to MP4 (H.264/AAC) with FFmpeg, then uploads the result to Pinata (IPFS) and returns the CID.
+
+## Endpoints
+
+- `GET /healthz` — health check
+- `POST /transcode` — multipart/form-data with a single field named `video`
+
+**Response**
+```json
+{ "cid": "bafy...", "gatewayUrl": "https://gateway.pinata.cloud/ipfs/bafy..." }
+```
+
+## Quickstart (Docker)
+
+```bash
+# 1) Clone this project
+# 2) Create .env with your PINATA_JWT
+cp .env.example .env
+# edit .env and paste your Pinata JWT
+
+# 3) Build & run
+docker build -t video-worker .
+docker run --env-file .env -p 8080:8080 --name video-worker video-worker
+
+# 4) Test
+curl -F "video=@/path/to/input.mov" http://localhost:8080/transcode
+```
+
+## Environment
+
+- `PINATA_JWT` (required) — Create in Pinata Dashboard → API Keys (JWT).
+- `PINATA_GATEWAY` (optional) — Defaults to `https://gateway.pinata.cloud/ipfs`.
+- `MAX_UPLOAD_MB` (optional) — Upload limit, default `512`.
+- `X264_PRESET`, `X264_CRF`, `AAC_BITRATE` — FFmpeg tuning knobs.
+
+## Deploy Options
+
+### Option A: Oracle Cloud "Always Free" VM (recommended free worker)
+1. Create an Always Free tenancy and launch an **Ampere A1** or **E2 Micro** VM.
+2. SSH in and install Docker:
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y docker.io
+   sudo usermod -aG docker $USER && newgrp docker
+   ```
+3. Copy this repo to the VM (git clone or scp the zip), then:
+   ```bash
+   docker build -t video-worker .
+   docker run -d --restart=unless-stopped --env-file .env -p 80:8080 --name video-worker video-worker
+   ```
+4. Open port 80 in the instance's VCN security list if needed.
+
+### Option B: Render (free web service)
+1. Push this repo to GitHub.
+2. In Render, create **New Web Service** from your repo.
+3. Use **Docker** build, set environment variables (`PINATA_JWT`, etc.).
+4. Choose a **Free** instance. Note: free instances may sleep and have limits.
+5. Deploy and use the generated URL for `/transcode`.
+
+## Notes
+
+- This service does a full transcode to ensure device compatibility. If you know your .mov files are already H.264/AAC, you can switch to a fast remux:
+  ```bash
+  ffmpeg -i input.mov -c copy -movflags +faststart output.mp4
+  ```
+  (Integrate by changing the ffmpeg args in `server.js`.)
+
+- For heavier workloads, consider running this behind a queue (e.g., Upstash QStash or Redis) and moving uploads to object storage (S3/R2).
+
+## License
+
+MIT

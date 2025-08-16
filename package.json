@@ -1,0 +1,20 @@
+{
+  "name": "video-worker",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Simple API that accepts a video upload, transcodes it to MP4 with ffmpeg, and uploads to Pinata (IPFS).",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "NODE_ENV=development node src/server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "form-data": "^4.0.0",
+    "multer": "^1.4.5-lts.1",
+    "morgan": "^1.10.0",
+    "uuid": "^9.0.1"
+  }
+}
