@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import morgan from 'morgan';
+import cors from 'cors';
 import axios from 'axios';
 import FormData from 'form-data';
 import { v4 as uuidv4 } from 'uuid';
@@ -18,6 +19,17 @@ const PINATA_GATEWAY = process.env.PINATA_GATEWAY || 'https://gateway.pinata.clo
 if (!PINATA_JWT) {
   console.warn('⚠️  PINATA_JWT is not set. Set it in your environment before starting.');
 }
+
+// --- CORS configuration ---
+// Allow requests from any origin
+const corsOptions = {
+  origin: true,
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+};
+
+app.use(cors(corsOptions));
 
 app.use(morgan('combined'));
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
@@ -48,7 +60,7 @@ function runFfmpeg(args) {
 // POST /transcode  (multipart form fields: video [required], creator [optional], thumbnail [optional])
 app.post('/transcode', upload.single('video'), async (req, res) => {
   if (!req.file) {
-    return res.status(400).json({ error: 'No file uploaded. Send multipart/form-data with field "video".' });
+    return res.status(400).json({ success: false, error: 'No file uploaded. Send multipart/form-data with field "video".' });
   }
   const inputPath = req.file.path;
   const outName = `${uuidv4()}.mp4`;
@@ -113,11 +125,11 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
 
     const { IpfsHash: cid } = resp.data;
     const gatewayUrl = `${PINATA_GATEWAY.replace(/\/+$/, '')}/${cid}`;
-    res.status(200).json({ cid, gatewayUrl });
+    res.status(200).json({ success: true, data: { cid, gatewayUrl } });
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message || 'Transcode failed' });
+    res.status(500).json({ success: false, error: err.message || 'Transcode failed' });
   } finally {
     // Cleanup
     try { fs.unlinkSync(inputPath); } catch {}
