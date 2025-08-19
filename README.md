@@ -9,7 +9,13 @@ A tiny API that accepts a file upload, transcodes it to MP4 (H.264/AAC) with FFm
 
 **Response**
 ```json
-{ "cid": "bafy...", "gatewayUrl": "https://gateway.pinata.cloud/ipfs/bafy..." }
+{
+  "success": true,
+  "data": {
+    "cid": "bafy...",
+    "gatewayUrl": "https://gateway.pinata.cloud/ipfs/bafy..."
+  }
+}
 ```
 
 ## Quickstart (Docker)
@@ -34,6 +40,8 @@ curl -F "video=@/path/to/input.mov" http://localhost:8080/transcode
 - `PINATA_GATEWAY` (optional) — Defaults to `https://gateway.pinata.cloud/ipfs`.
 - `MAX_UPLOAD_MB` (optional) — Upload limit, default `512`.
 - `X264_PRESET`, `X264_CRF`, `AAC_BITRATE` — FFmpeg tuning knobs.
+- CORS is open to all origins by default.
+- `NODE_ENV` — Environment mode (`development` or `production`).
 
 ## Deploy Options
 
