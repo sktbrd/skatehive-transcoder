@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import morgan from 'morgan';
+import cors from 'cors';
 import axios from 'axios';
 import FormData from 'form-data';
 import { v4 as uuidv4 } from 'uuid';
@@ -20,6 +21,7 @@ if (!PINATA_JWT) {
 }
 
 app.use(morgan('combined'));
+app.use(cors());
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
 // Configure multer to write incoming file to the OS temp dir
