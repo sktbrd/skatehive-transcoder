@@ -12,6 +12,20 @@ import FormData from 'form-data';
 import { v4 as uuidv4 } from 'uuid';
 
 const app = express();
+
+// Open CORS (no credentials). Put this BEFORE routes.
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*'); // allow any origin
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204); // preflight OK
+  next();
+});
+
+// Keep Render health probes happy (avoid 404 on / and HEAD /)
+app.get('/', (_req, res) => res.send('OK'));
+app.head('/', (_req, res) => res.sendStatus(200));
+
 const PORT = process.env.PORT || 8080;
 const PINATA_JWT = process.env.PINATA_JWT;
 const PINATA_GATEWAY = process.env.PINATA_GATEWAY || 'https://gateway.pinata.cloud/ipfs'; // optional
