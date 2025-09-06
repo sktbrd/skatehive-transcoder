@@ -169,15 +169,15 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
   const origin = req.get('Origin') || req.get('Referer') || 'direct';
 
   // Extract rich user information from form data
-    // Get rich user data from form
-    const creator = formData.get('creator') || 'anonymous';
-    const platform = formData.get('platform') || 'unknown';
-    const deviceInfo = formData.get('deviceInfo') || '';
-    const browserInfo = formData.get('browserInfo') || '';
-    const userHP = formData.get('userHP') || null;
-    const correlationId = formData.get('correlationId') || null;
-    const viewport = formData.get('viewport') || null;
-    const connectionType = formData.get('connectionType') || null;  // Parse device info from User-Agent if not provided
+  // Get rich user data from form
+  const creator = req.body.creator || 'anonymous';
+  const platform = req.body.platform || 'unknown';
+  const deviceInfo = req.body.deviceInfo || '';
+  const browserInfo = req.body.browserInfo || '';
+  const userHP = req.body.userHP || null;
+  const correlationId = req.body.correlationId || null;
+  const viewport = req.body.viewport || null;
+  const connectionType = req.body.connectionType || null;  // Parse device info from User-Agent if not provided
   const deviceDetails = parseDeviceInfo(userAgent, deviceInfo);
 
   // Log transcode start
