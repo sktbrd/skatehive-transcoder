@@ -132,7 +132,7 @@ class TranscodeLogger {
     logTranscodeComplete({ id, user, filename, cid, gatewayUrl, duration, clientIP }) {
         // Find the original start log to preserve device context
         const startLog = this.logs.find(log => log.id === id && log.status === 'started');
-        
+
         this.addLog({
             id,
             status: 'completed',
@@ -157,7 +157,7 @@ class TranscodeLogger {
     logTranscodeError({ id, user, filename, error, duration, clientIP }) {
         // Find the original start log to preserve device context
         const startLog = this.logs.find(log => log.id === id && log.status === 'started');
-        
+
         this.addLog({
             id,
             status: 'failed',
