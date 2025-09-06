@@ -174,7 +174,10 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
     const platform = formData.get('platform') || 'unknown';
     const deviceInfo = formData.get('deviceInfo') || '';
     const browserInfo = formData.get('browserInfo') || '';
-    const userHP = formData.get('userHP') || null;  // Parse device info from User-Agent if not provided
+    const userHP = formData.get('userHP') || null;
+    const correlationId = formData.get('correlationId') || null;
+    const viewport = formData.get('viewport') || null;
+    const connectionType = formData.get('connectionType') || null;  // Parse device info from User-Agent if not provided
   const deviceDetails = parseDeviceInfo(userAgent, deviceInfo);
 
   // Log transcode start
@@ -189,7 +192,10 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
     platform,
     deviceInfo: deviceDetails,
     browserInfo,
-    userHP
+    userHP,
+    correlationId,
+    viewport,
+    connectionType
   });
 
   if (!req.file) {

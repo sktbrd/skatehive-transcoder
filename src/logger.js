@@ -69,6 +69,18 @@ class TranscodeLogger {
         console.log(`   🌐 Platform: ${log.platform || 'unknown'}`);
         console.log(`   ⏱️  Duration: ${duration}`);
 
+        if (log.correlationId) {
+            console.log(`   � Correlation: ${log.correlationId}`);
+        }
+
+        if (log.viewport) {
+            console.log(`   📐 Viewport: ${log.viewport}`);
+        }
+
+        if (log.connectionType) {
+            console.log(`   📶 Connection: ${log.connectionType}`);
+        }
+
         if (log.cid) {
             console.log(`   📦 CID: ${log.cid}`);
         }
@@ -96,7 +108,7 @@ class TranscodeLogger {
         return emojis[status] || '📝';
     }
 
-    logTranscodeStart({ id, user, filename, fileSize, clientIP, userAgent, origin, platform, deviceInfo, browserInfo, userHP }) {
+    logTranscodeStart({ id, user, filename, fileSize, clientIP, userAgent, origin, platform, deviceInfo, browserInfo, userHP, correlationId, viewport, connectionType }) {
         this.addLog({
             id,
             status: 'started',
@@ -110,6 +122,9 @@ class TranscodeLogger {
             deviceInfo: deviceInfo || 'unknown',
             browserInfo: browserInfo || '',
             userHP: userHP || 0,
+            correlationId: correlationId || null,
+            viewport: viewport || null,
+            connectionType: connectionType || null,
             startTime: Date.now()
         });
     }
@@ -164,7 +179,10 @@ class TranscodeLogger {
             clientIP: log.clientIP,
             platform: log.platform,
             deviceInfo: log.deviceInfo,
-            userHP: log.userHP
+            userHP: log.userHP,
+            correlationId: log.correlationId,
+            viewport: log.viewport,
+            connectionType: log.connectionType
         }));
     }
 
