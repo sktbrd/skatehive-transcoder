@@ -130,6 +130,9 @@ class TranscodeLogger {
     }
 
     logTranscodeComplete({ id, user, filename, cid, gatewayUrl, duration, clientIP }) {
+        // Find the original start log to preserve device context
+        const startLog = this.logs.find(log => log.id === id && log.status === 'started');
+        
         this.addLog({
             id,
             status: 'completed',
@@ -139,11 +142,22 @@ class TranscodeLogger {
             gatewayUrl,
             duration,
             clientIP,
-            success: true
+            success: true,
+            // Preserve device info from start log
+            platform: startLog?.platform || null,
+            deviceInfo: startLog?.deviceInfo || null,
+            browserInfo: startLog?.browserInfo || null,
+            userHP: startLog?.userHP || null,
+            correlationId: startLog?.correlationId || null,
+            viewport: startLog?.viewport || null,
+            connectionType: startLog?.connectionType || null
         });
     }
 
     logTranscodeError({ id, user, filename, error, duration, clientIP }) {
+        // Find the original start log to preserve device context
+        const startLog = this.logs.find(log => log.id === id && log.status === 'started');
+        
         this.addLog({
             id,
             status: 'failed',
@@ -152,7 +166,15 @@ class TranscodeLogger {
             error: error?.message || error || 'Unknown error',
             duration,
             clientIP,
-            success: false
+            success: false,
+            // Preserve device info from start log
+            platform: startLog?.platform || null,
+            deviceInfo: startLog?.deviceInfo || null,
+            browserInfo: startLog?.browserInfo || null,
+            userHP: startLog?.userHP || null,
+            correlationId: startLog?.correlationId || null,
+            viewport: startLog?.viewport || null,
+            connectionType: startLog?.connectionType || null
         });
     }
 
