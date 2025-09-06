@@ -170,7 +170,7 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
 
   // Extract rich user information from form data
   // Get rich user data from form (with backward compatibility)
-  const creator = req.body.creator || req.body.user || req.body.sessionId || 'anonymous';
+  const creator = req.body.creator || req.body.user || 'anonymous';
   const platform = req.body.platform || 'unknown';
   const deviceInfo = req.body.deviceInfo || '';
   const browserInfo = req.body.browserInfo || '';
@@ -252,8 +252,7 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
         deviceInfo: deviceDetails,
         userHP: userHP.toString(),
         clientIP: clientIP.substring(0, 20), // truncated for privacy
-        ...(thumbnail ? { thumbnail } : {}),
-        ...(sessionId ? { sessionId } : {})
+        ...(thumbnail ? { thumbnail } : {})
       }
     };
     form.append('pinataMetadata', JSON.stringify(metadata));
