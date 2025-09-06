@@ -69,10 +69,6 @@ class TranscodeLogger {
         console.log(`   🌐 Platform: ${log.platform || 'unknown'}`);
         console.log(`   ⏱️  Duration: ${duration}`);
 
-        if (log.sessionId) {
-            console.log(`   🔗 Session: ${log.sessionId}`);
-        }
-
         if (log.cid) {
             console.log(`   📦 CID: ${log.cid}`);
         }
@@ -100,7 +96,7 @@ class TranscodeLogger {
         return emojis[status] || '📝';
     }
 
-    logTranscodeStart({ id, user, filename, fileSize, clientIP, userAgent, origin, platform, deviceInfo, browserInfo, sessionId, userHP }) {
+    logTranscodeStart({ id, user, filename, fileSize, clientIP, userAgent, origin, platform, deviceInfo, browserInfo, userHP }) {
         this.addLog({
             id,
             status: 'started',
@@ -113,7 +109,6 @@ class TranscodeLogger {
             platform: platform || 'unknown',
             deviceInfo: deviceInfo || 'unknown',
             browserInfo: browserInfo || '',
-            sessionId: sessionId || '',
             userHP: userHP || 0,
             startTime: Date.now()
         });
@@ -169,8 +164,7 @@ class TranscodeLogger {
             clientIP: log.clientIP,
             platform: log.platform,
             deviceInfo: log.deviceInfo,
-            userHP: log.userHP,
-            sessionId: log.sessionId
+            userHP: log.userHP
         }));
     }
 

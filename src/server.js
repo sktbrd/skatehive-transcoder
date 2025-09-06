@@ -169,14 +169,12 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
   const origin = req.get('Origin') || req.get('Referer') || 'direct';
 
   // Extract rich user information from form data
-  const creator = (req.body?.creator ?? '').toString().trim().slice(0, 64) || 'anonymous';
-  const platform = (req.body?.platform ?? '').toString().trim().slice(0, 32) || 'unknown';
-  const deviceInfo = (req.body?.deviceInfo ?? '').toString().trim().slice(0, 128) || '';
-  const browserInfo = (req.body?.browserInfo ?? '').toString().trim().slice(0, 128) || '';
-  const sessionId = (req.body?.sessionId ?? '').toString().trim().slice(0, 64) || '';
-  const userHP = parseInt(req.body?.userHP ?? '0') || 0;
-
-  // Parse device info from User-Agent if not provided
+    // Get rich user data from form
+    const creator = formData.get('creator') || 'anonymous';
+    const platform = formData.get('platform') || 'unknown';
+    const deviceInfo = formData.get('deviceInfo') || '';
+    const browserInfo = formData.get('browserInfo') || '';
+    const userHP = formData.get('userHP') || null;  // Parse device info from User-Agent if not provided
   const deviceDetails = parseDeviceInfo(userAgent, deviceInfo);
 
   // Log transcode start
@@ -191,7 +189,6 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
     platform,
     deviceInfo: deviceDetails,
     browserInfo,
-    sessionId,
     userHP
   });
 
