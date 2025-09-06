@@ -169,8 +169,8 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
   const origin = req.get('Origin') || req.get('Referer') || 'direct';
 
   // Extract rich user information from form data
-  // Get rich user data from form
-  const creator = req.body.creator || 'anonymous';
+  // Get rich user data from form (with backward compatibility)
+  const creator = req.body.creator || req.body.user || req.body.sessionId || 'anonymous';
   const platform = req.body.platform || 'unknown';
   const deviceInfo = req.body.deviceInfo || '';
   const browserInfo = req.body.browserInfo || '';
