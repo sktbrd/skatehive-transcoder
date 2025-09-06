@@ -6,6 +6,8 @@ A tiny API that accepts a file upload, transcodes it to MP4 (H.264/AAC) with FFm
 
 - `GET /healthz` — health check
 - `POST /transcode` — multipart/form-data with a single field named `video`
+- `GET /logs` — get recent transcode operations (JSON)
+- `GET /stats` — get transcoding statistics (JSON)
 
 **Response**
 ```json
@@ -17,6 +19,27 @@ A tiny API that accepts a file upload, transcodes it to MP4 (H.264/AAC) with FFm
   }
 }
 ```
+
+## Logging & Monitoring
+
+The service now includes rich structured logging that tracks:
+- User/creator information
+- File details (name, size)
+- Processing duration
+- Success/failure status
+- Client IP addresses
+- IPFS CIDs and gateway URLs
+
+**Logging Features:**
+- Maintains last 100 operations in `logs/transcode.log`
+- JSON-structured log entries for easy parsing
+- Dashboard-friendly endpoints
+- Rich console output with emojis and formatting
+
+**Dashboard Integration:**
+- `GET /logs?limit=N` - Returns recent operations for dashboard display
+- `GET /stats` - Returns aggregated statistics (success rate, avg duration, etc.)
+- Designed to work with the Skatehive dashboard monitoring system
 
 ## Quickstart (Docker)
 
@@ -30,8 +53,17 @@ cp .env.example .env
 docker build -t video-worker .
 docker run --env-file .env -p 8080:8080 --name video-worker video-worker
 
+```bash
 # 4) Test
 curl -F "video=@/path/to/input.mov" http://localhost:8080/transcode
+
+# 5) Test logging system (creates mock log entries)
+npm run test-logs
+
+# 6) Check logs and stats
+curl http://localhost:8080/logs
+curl http://localhost:8080/stats
+```
 ```
 
 ## Environment
