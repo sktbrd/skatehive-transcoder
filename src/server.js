@@ -15,14 +15,23 @@ import TranscodeLogger from './logger.js';
 const app = express();
 const logger = new TranscodeLogger();
 
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://skatehive.app,http://localhost:3000,http://localhost:19006').split(',').map(s => s.trim()).filter(Boolean);
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://skatehive.app,http://localhost:3000,http://localhost:19006,https://*.vercel.app').split(',').map(s => s.trim()).filter(Boolean);
 const MOBILE_UPLOAD_TOKEN = process.env.MOBILE_UPLOAD_TOKEN || '';
+
+function isOriginAllowed(origin) {
+  return ALLOWED_ORIGINS.some(allowed => {
+    if (!allowed.includes('*')) return origin === allowed;
+    // Wildcard support: https://*.vercel.app matches https://foo.vercel.app
+    const [prefix, suffix] = allowed.split('*');
+    return origin.startsWith(prefix) && origin.endsWith(suffix);
+  });
+}
 
 function getRequestAccess(req) {
   const origin = req.get('Origin') || '';
   const mobileToken = req.get('X-Skatehive-Upload-Key') || '';
   const clientType = req.get('X-Skatehive-Client') || '';
-  const hasAllowedOrigin = !!origin && ALLOWED_ORIGINS.includes(origin);
+  const hasAllowedOrigin = !!origin && isOriginAllowed(origin);
   const isMobileTokenValid = !!MOBILE_UPLOAD_TOKEN && mobileToken === MOBILE_UPLOAD_TOKEN;
   const isOriginlessRequest = !origin; // native mobile / server-to-server often send no Origin
   const allowed = hasAllowedOrigin || isMobileTokenValid || isOriginlessRequest;
