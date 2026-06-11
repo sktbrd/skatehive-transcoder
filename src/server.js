@@ -17,6 +17,9 @@ const logger = new TranscodeLogger();
 
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://skatehive.app,http://localhost:3000,http://localhost:19006,https://*.vercel.app').split(',').map(s => s.trim()).filter(Boolean);
 const MOBILE_UPLOAD_TOKEN = process.env.MOBILE_UPLOAD_TOKEN || '';
+const MAX_SAFE_SHORT_EDGE = 1080;
+const MAX_SAFE_LONG_EDGE = 1920;
+const MOBILE_SAFE_SCALE_FILTER = "scale=w='trunc(min(iw,1080)/2)*2':h='trunc(min(ih,1920)/2)*2':force_original_aspect_ratio=decrease";
 
 function isOriginAllowed(origin) {
   return ALLOWED_ORIGINS.some(allowed => {
@@ -38,8 +41,29 @@ function getRequestAccess(req) {
   return { allowed, origin, hasAllowedOrigin, isMobileTokenValid, isOriginlessRequest, clientType };
 }
 
+function isMobileSafeResolution(width, height) {
+  const shortEdge = Math.min(Number(width) || 0, Number(height) || 0);
+  const longEdge = Math.max(Number(width) || 0, Number(height) || 0);
+  return shortEdge <= MAX_SAFE_SHORT_EDGE && longEdge <= MAX_SAFE_LONG_EDGE;
+}
+
+function hasFastStart(inputPath) {
+  try {
+    const fd = fs.openSync(inputPath, 'r');
+    const buffer = Buffer.alloc(Math.min(1024 * 1024, fs.statSync(inputPath).size));
+    fs.readSync(fd, buffer, 0, buffer.length, 0);
+    fs.closeSync(fd);
+    const header = buffer.toString('latin1');
+    const moovIndex = header.indexOf('moov');
+    const mdatIndex = header.indexOf('mdat');
+    return moovIndex !== -1 && (mdatIndex === -1 || moovIndex < mdatIndex);
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Check if video is web-optimized (H.264/AAC, faststart, reasonable size)
+ * Check if video is web/mobile optimized (H.264/AAC-LC, faststart, yuv420p, safe resolution)
  * Returns { optimized: boolean, reason?: string, videoInfo?: object }
  */
 async function checkWebOptimized(inputPath) {
@@ -72,9 +96,16 @@ async function checkWebOptimized(inputPath) {
           return resolve({ optimized: false, reason: `audio codec: ${audioStream.codec_name}` });
         }
 
-        const height = parseInt(videoStream.height);
-        if (height > 1080) {
-          return resolve({ optimized: false, reason: `resolution too high: ${height}p` });
+        if (audioStream && audioStream.profile && audioStream.profile !== 'LC') {
+          return resolve({ optimized: false, reason: `audio profile: ${audioStream.profile}` });
+        }
+
+        if (!isMobileSafeResolution(videoStream.width, videoStream.height)) {
+          return resolve({ optimized: false, reason: `resolution too high: ${videoStream.width}x${videoStream.height}` });
+        }
+
+        if (!hasFastStart(inputPath)) {
+          return resolve({ optimized: false, reason: 'moov atom is not faststart' });
         }
 
         // yuv420p (8-bit 4:2:0) is required for universal mobile hardware decode.
@@ -590,17 +621,28 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
         '-c:v', 'libx264',
         '-preset', process.env.X264_PRESET || 'medium',
         '-crf', crf,
-        '-vf', 'scale=min(iw\\,1920):min(ih\\,1080):force_original_aspect_ratio=decrease',
+        '-vf', MOBILE_SAFE_SCALE_FILTER,
         '-maxrate', '5M',
         '-bufsize', '10M',
         '-pix_fmt', 'yuv420p', // 8-bit 4:2:0 — required for universal mobile hardware decode
+        '-profile:v', 'high',
+        '-level:v', '4.1',
         '-c:a', 'aac',
+        '-profile:a', 'aac_low',
         '-b:a', process.env.AAC_BITRATE || '128k',
+        '-ac', '2',
+        '-ar', '44100',
         '-movflags', '+faststart',
         outputPath
       ];
 
       await runFfmpeg(ffArgs, requestId, videoDuration);
+
+      const outputValidation = await checkWebOptimized(outputPath);
+      if (!outputValidation.optimized) {
+        throw new Error(`Transcoded output failed mobile-safe validation: ${outputValidation.reason}`);
+      }
+      console.log(`✅ Mobile-safe output validated: ${JSON.stringify(outputValidation.videoInfo)}`);
     }
 
     broadcastProgress(requestId, 80, 'uploading');
