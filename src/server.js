@@ -724,6 +724,7 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
             },
             maxContentLength: Infinity,
             maxBodyLength: Infinity,
+            timeout: 300000, // 5 min per attempt — prevent silent hang
             onUploadProgress: (progressEvent) => {
               if (progressEvent.total) {
                 const uploadPercent = Math.round((progressEvent.loaded / progressEvent.total) * 15);
