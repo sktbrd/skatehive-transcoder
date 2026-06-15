@@ -19,7 +19,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://skatehive.app,h
 const MOBILE_UPLOAD_TOKEN = process.env.MOBILE_UPLOAD_TOKEN || '';
 const MAX_SAFE_SHORT_EDGE = 1080;
 const MAX_SAFE_LONG_EDGE = 1920;
-const MOBILE_SAFE_SCALE_FILTER = "scale=w='trunc(min(iw,1080)/2)*2':h='trunc(min(ih,1920)/2)*2':force_original_aspect_ratio=decrease";
+const MOBILE_SAFE_SCALE_FILTER = "scale=w='min(iw,1080)':h='min(ih,1920)':force_original_aspect_ratio=decrease,scale=w='trunc(iw/2)*2':h='trunc(ih/2)*2'";
 
 function isOriginAllowed(origin) {
   return ALLOWED_ORIGINS.some(allowed => {
