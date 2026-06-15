@@ -134,6 +134,23 @@ async function checkWebOptimized(inputPath) {
 
 // Store active transcoding progress for SSE clients
 const activeJobs = new Map(); // requestId -> { progress, stage, clients: Set<Response> }
+const activeProcessingJobs = new Map(); // requestId -> { startedAt, filename, sourceApp }
+const MAX_CONCURRENT_JOBS = Number.parseInt(process.env.MAX_CONCURRENT_JOBS || process.env.MAX_CONCURRENT_TRANSCODES || '1', 10);
+const FFMPEG_TIMEOUT_MS = Number.parseInt(process.env.FFMPEG_TIMEOUT_MS || String(10 * 60 * 1000), 10);
+
+function getCapacity() {
+  return {
+    active: activeProcessingJobs.size,
+    max: Number.isFinite(MAX_CONCURRENT_JOBS) && MAX_CONCURRENT_JOBS > 0 ? MAX_CONCURRENT_JOBS : 1,
+    available: Math.max(0, (Number.isFinite(MAX_CONCURRENT_JOBS) && MAX_CONCURRENT_JOBS > 0 ? MAX_CONCURRENT_JOBS : 1) - activeProcessingJobs.size),
+    jobs: [...activeProcessingJobs.entries()].map(([id, job]) => ({
+      id,
+      filename: job.filename,
+      sourceApp: job.sourceApp,
+      elapsedMs: Date.now() - job.startedAt
+    }))
+  };
+}
 
 // Restrictive CORS: allow Skatehive web origins, native/mobile token, and originless app/server calls
 app.use((req, res, next) => {
@@ -224,7 +241,17 @@ const sendHealth = (req, res, payload, title) => {
 app.get('/', (_req, res) => res.send('🎬 Video Worker - Ready for transcoding!'));
 app.head('/', (_req, res) => res.sendStatus(200));
 app.get('/healthz', (req, res) => {
-  const payload = { ok: true, service: 'video-worker', timestamp: new Date().toISOString() };
+  const capacity = getCapacity();
+  const payload = {
+    ok: true,
+    service: 'video-worker',
+    timestamp: new Date().toISOString(),
+    capacity: {
+      active: capacity.active,
+      max: capacity.max,
+      available: capacity.available
+    }
+  };
   sendHealth(req, res, payload, 'Video Worker Health');
 });
 
@@ -276,6 +303,18 @@ function broadcastProgress(requestId, progress, stage) {
   }
 }
 
+function closeJobLater(requestId, delayMs = 5000) {
+  setTimeout(() => {
+    if (activeJobs.has(requestId)) {
+      const job = activeJobs.get(requestId);
+      job?.clients?.forEach(client => {
+        try { client.end(); } catch { }
+      });
+      activeJobs.delete(requestId);
+    }
+  }, delayMs);
+}
+
 // Dashboard endpoints
 app.get('/logs', (_req, res) => {
   const limit = parseInt(_req.query.limit) || 10;
@@ -284,7 +323,7 @@ app.get('/logs', (_req, res) => {
 });
 
 app.get('/stats', (_req, res) => {
-  res.json(logger.getStats());
+  res.json({ ...logger.getStats(), capacity: getCapacity() });
 });
 
 // Configure multer to write incoming file to the OS temp dir
@@ -441,6 +480,27 @@ function runFfmpeg(args, requestId = 'unknown', totalDuration = 0) {
     const startTime = Date.now();
     const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';
+    let timedOut = false;
+    let settled = false;
+
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      fn(value);
+    };
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      console.error(`⏱️ [FFMPEG-TIMEOUT] ID: ${requestId} | Timeout: ${FFMPEG_TIMEOUT_MS}ms`);
+      broadcastProgress(requestId, 0, 'timeout');
+      try { proc.kill('SIGTERM'); } catch {}
+      setTimeout(() => {
+        if (!settled) {
+          try { proc.kill('SIGKILL'); } catch {}
+        }
+      }, 5000);
+    }, FFMPEG_TIMEOUT_MS);
 
     proc.stderr.on('data', (d) => {
       stderr += d.toString();
@@ -470,15 +530,28 @@ function runFfmpeg(args, requestId = 'unknown', totalDuration = 0) {
 
     proc.on('close', (code) => {
       const duration = Date.now() - startTime;
+      if (timedOut) {
+        const error = new Error(`ffmpeg timed out after ${FFMPEG_TIMEOUT_MS}ms`);
+        error.code = 'FFMPEG_TIMEOUT';
+        console.error(`❌ [FFMPEG-TIMEOUT] ID: ${requestId} | Duration: ${duration}ms | Error: ${stderr.slice(-400)}`);
+        settle(reject, error);
+        return;
+      }
+
       if (code === 0) {
         console.log(`✅ [FFMPEG-SUCCESS] ID: ${requestId} | Duration: ${duration}ms`);
         broadcastProgress(requestId, 80, 'uploading'); // Transcoding done, now uploading
-        resolve({ ok: true });
+        settle(resolve, { ok: true });
       } else {
         console.error(`❌ [FFMPEG-ERROR] ID: ${requestId} | Code: ${code} | Duration: ${duration}ms | Error: ${stderr.slice(-400)}`);
         broadcastProgress(requestId, 0, 'error');
-        reject(new Error(`ffmpeg exited with ${code}: ${stderr.slice(-4000)}`));
+        settle(reject, new Error(`ffmpeg exited with ${code}: ${stderr.slice(-4000)}`));
       }
+    });
+
+    proc.on('error', (error) => {
+      broadcastProgress(requestId, 0, 'error');
+      settle(reject, error);
     });
   });
 }
@@ -569,6 +642,7 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
   let outputPath = null;
   let needsTranscoding = false;
   let videoDuration = 0;
+  let processingSlotAcquired = false;
 
   // Initialize job tracking for SSE - PRESERVE existing clients if SSE connected first!
   const existingJob = activeJobs.get(requestId);
@@ -576,6 +650,42 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
   activeJobs.set(requestId, { progress: 0, stage: 'starting', clients });
   console.log(`📡 SSE clients for ${requestId}: ${clients.size}`);
   broadcastProgress(requestId, 5, 'receiving');
+
+  const capacity = getCapacity();
+  if (capacity.active >= capacity.max) {
+    const duration = Date.now() - startTime;
+    const error = `Worker busy: ${capacity.active}/${capacity.max} processing jobs active`;
+    console.warn(`🚦 [BUSY] ID: ${requestId} | ${error}`);
+    broadcastProgress(requestId, 0, 'busy');
+    logger.logTranscodeError({
+      id: requestId,
+      user: creator,
+      filename: req.file?.originalname || 'unknown',
+      error,
+      duration,
+      clientIP
+    });
+    try { fs.unlinkSync(inputPath); } catch {}
+    closeJobLater(requestId);
+    return res.status(503).json({
+      error,
+      requestId,
+      retryAfterSeconds: 30,
+      capacity: {
+        active: capacity.active,
+        max: capacity.max,
+        available: capacity.available
+      },
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  activeProcessingJobs.set(requestId, {
+    startedAt: Date.now(),
+    filename: fileName,
+    sourceApp
+  });
+  processingSlotAcquired = true;
 
   try {
     // Check if file is already web-optimized
@@ -793,13 +903,18 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
       clientIP
     });
 
-    res.status(500).json({
+    const statusCode = err.code === 'FFMPEG_TIMEOUT' ? 504 : 500;
+    res.status(statusCode).json({
       error: err.message || 'Transcode failed',
       requestId,
       duration: totalDuration,
       timestamp: new Date().toISOString()
     });
   } finally {
+    if (processingSlotAcquired) {
+      activeProcessingJobs.delete(requestId);
+    }
+
     // Cleanup - only delete transcoded file if different from input
     try { fs.unlinkSync(inputPath); } catch { }
     if (needsTranscoding && outputPath && outputPath !== inputPath) {
@@ -807,15 +922,7 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
     }
 
     // Clean up job tracking after a delay (let SSE clients receive final state)
-    setTimeout(() => {
-      if (activeJobs.has(requestId)) {
-        const job = activeJobs.get(requestId);
-        job?.clients?.forEach(client => {
-          try { client.end(); } catch { }
-        });
-        activeJobs.delete(requestId);
-      }
-    }, 5000);
+    closeJobLater(requestId);
   }
 });
 

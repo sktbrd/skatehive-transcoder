@@ -41,6 +41,8 @@ The service now supports **Server-Sent Events (SSE)** for real-time progress upd
 | `transcoding` | 10-80% | FFmpeg processing (based on video duration) |
 | `uploading` | 80-100% | Uploading to Pinata IPFS |
 | `complete` | 100% | Done! |
+| `busy` | 0% | Worker is at capacity; client should retry or use another node |
+| `timeout` | 0% | FFmpeg exceeded the configured timeout and was killed |
 | `error` | 0% | Something went wrong |
 
 ### SSE Client Example
@@ -136,9 +138,11 @@ curl http://localhost:8080/stats
 - `PINATA_JWT` (required) — Create in Pinata Dashboard → API Keys (JWT).
 - `PINATA_GATEWAY` (optional) — Defaults to `https://gateway.pinata.cloud/ipfs`.
 - `MAX_UPLOAD_MB` (optional) — Upload limit, default `512` (set to `200` on Mac Mini M4).
+- `MAX_CONCURRENT_JOBS` (optional) — Active `/transcode` jobs allowed at once, default `1`.
+- `FFMPEG_TIMEOUT_MS` (optional) — FFmpeg kill timeout, default `600000` (10 minutes).
 - `X264_PRESET`, `X264_CRF`, `AAC_BITRATE` — FFmpeg tuning knobs.
 - `PORT` (optional) — Internal port, defaults to `8080`.
-- CORS is open to all origins by default.
+- `ALLOWED_ORIGINS` (optional) — Comma-separated web origins; defaults to SkateHive, localhost, and Vercel previews.
 - `NODE_ENV` — Environment mode (`development` or `production`).
 
 ## Production Deployment (Mac Mini M4)

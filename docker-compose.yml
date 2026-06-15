@@ -8,6 +8,8 @@ services:
     environment:
       - PORT=8080
       - NODE_NAME=${NODE_NAME:-macmini}
+      - MAX_CONCURRENT_JOBS=${MAX_CONCURRENT_JOBS:-1}
+      - FFMPEG_TIMEOUT_MS=${FFMPEG_TIMEOUT_MS:-600000}
     volumes:
       - ./logs:/app/logs
     restart: unless-stopped
