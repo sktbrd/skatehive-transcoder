@@ -880,7 +880,8 @@ app.post('/transcode', upload.single('video'), async (req, res) => {
       duration: totalDuration,
       creator,
       sourceApp,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      ...(thumbnail && { thumbnailUrl: thumbnail })
     });
 
   } catch (err) {
