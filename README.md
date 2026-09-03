@@ -6,6 +6,7 @@ A tiny API that accepts a file upload, transcodes it to MP4 (H.264/AAC) with FFm
 
 - `GET /healthz` — health check
 - `POST /transcode` — multipart/form-data with a single field named `video`
+- `POST /thumbnail` — grab a thumbnail for an existing IPFS CID (see below)
 - `GET /progress/:requestId` — **SSE (Server-Sent Events)** for real-time progress streaming
 - `GET /logs` — get recent transcode operations (JSON)
 - `GET /stats` — get transcoding statistics (JSON)
@@ -20,6 +21,42 @@ A tiny API that accepts a file upload, transcodes it to MP4 (H.264/AAC) with FFm
   }
 }
 ```
+
+## Thumbnail-by-CID (`POST /thumbnail`)
+
+For skatehive-api's F3 feature (server-side thumbnails for `/api/v2/videos`):
+given a CID that's already pinned but has no thumbnail, grab a frame straight
+off the IPFS gateway and pin it, without re-running the full transcode
+pipeline.
+
+- Guarded by a **shared secret**, not the CORS/origin gate the other routes
+  use — this is a server-to-server call from skatehive-api, not a
+  browser/app upload. Send it as `x-thumbnail-secret`.
+- Its own capacity of **1**, entirely separate from `/transcode`'s semaphore,
+  so a burst of thumbnail requests can never starve (or be starved by) real
+  uploads.
+- Captures the frame at a fixed **1 second** in (unlike `/transcode`'s
+  duration-based capture), with a 60s timeout on the whole fetch+ffmpeg step
+  — CIDs the gateway doesn't serve (unpinned, wrong network, etc.) fail fast
+  rather than hanging.
+
+**Request**
+```bash
+curl -X POST https://minivlad.tail83ea3e.ts.net/video/thumbnail \
+  -H "content-type: application/json" \
+  -H "x-thumbnail-secret: $THUMBNAIL_SHARED_SECRET" \
+  -d '{"cid":"bafybeig..."}'
+```
+
+**Response**
+```json
+{ "cid": "bafybeig...", "thumbnailUrl": "https://ipfs.skatehive.app/ipfs/bafy..." }
+```
+
+On failure: `401` (bad/missing secret), `400` (missing/malformed `cid`),
+`404` (the gateway wouldn't serve this CID, or ffmpeg couldn't grab a frame
+from it), `502` (thumbnail generated but the Pinata upload failed), `503`
+(another thumbnail job is already in flight — retry shortly).
 
 ## 🆕 Real-Time Progress Streaming (SSE)
 
@@ -144,6 +181,8 @@ curl http://localhost:8080/stats
 - `PORT` (optional) — Internal port, defaults to `8080`.
 - `ALLOWED_ORIGINS` (optional) — Comma-separated web origins; defaults to SkateHive, localhost, and Vercel previews.
 - `NODE_ENV` — Environment mode (`development` or `production`).
+- `THUMBNAIL_SHARED_SECRET` (required for `POST /thumbnail`) — must match skatehive-api's `THUMBNAIL_SHARED_SECRET`. The route rejects every request (401) until this is set.
+- `THUMBNAIL_FETCH_TIMEOUT_MS` (optional) — kill timeout for the gateway-fetch + ffmpeg step in `POST /thumbnail`, default `60000` (60s).
 
 ## Production Deployment (Mac Mini M4)
 

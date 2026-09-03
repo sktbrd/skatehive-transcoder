@@ -138,6 +138,11 @@ const activeProcessingJobs = new Map(); // requestId -> { startedAt, filename, s
 const MAX_CONCURRENT_JOBS = Number.parseInt(process.env.MAX_CONCURRENT_JOBS || process.env.MAX_CONCURRENT_TRANSCODES || '1', 10);
 const FFMPEG_TIMEOUT_MS = Number.parseInt(process.env.FFMPEG_TIMEOUT_MS || String(10 * 60 * 1000), 10);
 
+// F3: thumbnail-by-CID jobs get their own capacity of 1, entirely separate
+// from activeProcessingJobs, so a burst of thumbnail requests can never
+// starve (or be starved by) real /transcode uploads.
+const activeThumbnailJobs = new Set(); // cid -> in progress
+
 function getCapacity() {
   return {
     active: activeProcessingJobs.size,
@@ -206,6 +211,14 @@ const PORT = process.env.PORT || 8080;
 const PINATA_JWT = process.env.PINATA_JWT;
 const PINATA_GATEWAY = process.env.PINATA_GATEWAY || 'https://ipfs.skatehive.app/ipfs';
 const PINATA_GROUP_VIDEOS = process.env.PINATA_GROUP_VIDEOS || null;
+// F3 (server-side thumbnails): shared secret guarding POST /thumbnail. The
+// caller (skatehive-api) must send the same value as x-thumbnail-secret.
+const THUMBNAIL_SHARED_SECRET = process.env.THUMBNAIL_SHARED_SECRET || '';
+const THUMBNAIL_FETCH_TIMEOUT_MS = Number.parseInt(process.env.THUMBNAIL_FETCH_TIMEOUT_MS || '60000', 10);
+
+if (!THUMBNAIL_SHARED_SECRET) {
+  console.warn('⚠️  THUMBNAIL_SHARED_SECRET is not set — POST /thumbnail will reject every request.');
+}
 
 if (!PINATA_JWT) {
   console.warn('⚠️  PINATA_JWT is not set. Set it in your environment before starting.');
@@ -250,9 +263,65 @@ app.get('/healthz', (req, res) => {
       active: capacity.active,
       max: capacity.max,
       available: capacity.available
+    },
+    thumbnailCapacity: {
+      active: activeThumbnailJobs.size,
+      max: 1,
+      available: activeThumbnailJobs.size >= 1 ? 0 : 1
     }
   };
   sendHealth(req, res, payload, 'Video Worker Health');
+});
+
+// F3 (server-side thumbnails): given a CID, grab a frame straight off the
+// IPFS gateway and pin it. Guarded by a shared secret (not the CORS/origin
+// gate above) since this is a server-to-server call from skatehive-api, not
+// a browser/app upload. Its own capacity of 1, separate from /transcode.
+app.post('/thumbnail', express.json(), async (req, res) => {
+  const provided = req.get('x-thumbnail-secret') || '';
+  if (!THUMBNAIL_SHARED_SECRET || provided !== THUMBNAIL_SHARED_SECRET) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  }
+
+  const cid = String(req.body?.cid || '').trim();
+  if (!cid || !/^[a-zA-Z0-9]+$/.test(cid)) {
+    return res.status(400).json({ ok: false, error: 'Missing or invalid cid' });
+  }
+
+  if (activeThumbnailJobs.size >= 1) {
+    return res.status(503).json({ ok: false, error: 'Thumbnail worker busy, try again shortly', cid });
+  }
+
+  activeThumbnailJobs.add(cid);
+  const startTime = Date.now();
+  let thumbPath = null;
+  try {
+    const gatewayUrl = `${PINATA_GATEWAY.replace(/\/+$/, '')}/${cid}`;
+    thumbPath = await generateThumbnail(gatewayUrl, undefined, {
+      captureTime: 1,
+      timeoutMs: THUMBNAIL_FETCH_TIMEOUT_MS
+    });
+    if (!thumbPath) {
+      console.warn(`⚠️ Thumbnail generation failed for ${cid} (gateway didn't serve it in time, or ffmpeg failed)`);
+      return res.status(404).json({ ok: false, error: 'Could not generate a thumbnail for this CID', cid });
+    }
+
+    const thumbnailUrl = await uploadThumbnailToPinata(thumbPath, cid);
+    thumbPath = null; // uploadThumbnailToPinata always cleans up the file itself, success or failure
+
+    if (!thumbnailUrl) {
+      return res.status(502).json({ ok: false, error: 'Thumbnail generated but the Pinata upload failed', cid });
+    }
+
+    console.log(`✅ Thumbnail ready for ${cid} in ${Date.now() - startTime}ms`);
+    return res.json({ cid, thumbnailUrl });
+  } catch (err) {
+    console.error(`⚠️ Thumbnail job failed for ${cid}:`, err.message || err);
+    return res.status(500).json({ ok: false, error: 'Thumbnail job failed', cid });
+  } finally {
+    activeThumbnailJobs.delete(cid);
+    if (thumbPath) { try { fs.unlinkSync(thumbPath); } catch {} }
+  }
 });
 
 // SSE endpoint for progress streaming
@@ -371,10 +440,14 @@ function parseDeviceInfo(userAgent, providedDeviceInfo) {
  * Captures a frame at 10% into the video (max 5s) and scales to max 640px.
  * Returns the path to the thumbnail file, or null on failure.
  */
-async function generateThumbnail(videoPath, videoDuration) {
+async function generateThumbnail(videoPath, videoDuration, opts = {}) {
   const thumbPath = path.join(os.tmpdir(), `thumb-${uuidv4()}.jpg`);
-  // Capture at 10% of duration, capped at 5s, minimum 0.5s
-  const captureTime = Math.min(Math.max((videoDuration || 2) * 0.1, 0.5), 5);
+  // Capture at 10% of duration, capped at 5s, minimum 0.5s — unless the
+  // caller (F3's /thumbnail route, which has no duration up front) passes a
+  // fixed captureTime instead.
+  const captureTime = opts.captureTime != null
+    ? opts.captureTime
+    : Math.min(Math.max((videoDuration || 2) * 0.1, 0.5), 5);
 
   return new Promise((resolve) => {
     const proc = spawn('ffmpeg', [
@@ -387,15 +460,28 @@ async function generateThumbnail(videoPath, videoDuration) {
       thumbPath
     ]);
 
+    let timedOut = false;
+    const timeoutId = opts.timeoutMs
+      ? setTimeout(() => {
+          timedOut = true;
+          proc.kill('SIGKILL');
+        }, opts.timeoutMs)
+      : null;
+
     proc.on('close', (code) => {
-      if (code === 0 && fs.existsSync(thumbPath)) {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (!timedOut && code === 0 && fs.existsSync(thumbPath)) {
         resolve(thumbPath);
       } else {
+        try { fs.unlinkSync(thumbPath); } catch {}
         resolve(null);
       }
     });
 
-    proc.on('error', () => resolve(null));
+    proc.on('error', () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      resolve(null);
+    });
   });
 }
 
