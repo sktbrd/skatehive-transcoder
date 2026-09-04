@@ -8,8 +8,19 @@ import os from 'os';
 import morgan from 'morgan';
 import axios from 'axios';
 import FormData from 'form-data';
+import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import TranscodeLogger from './logger.js';
+
+// Constant-time shared-secret comparison — a plain !== leaks timing
+// information proportional to how many leading characters match, letting an
+// attacker recover the secret byte-by-byte over enough requests.
+function timingSafeEqualSecret(provided, expected) {
+  const providedBuf = Buffer.from(String(provided || ''));
+  const expectedBuf = Buffer.from(String(expected || ''));
+  if (providedBuf.length !== expectedBuf.length) return false;
+  return crypto.timingSafeEqual(providedBuf, expectedBuf);
+}
 
 
 const app = express();
@@ -224,6 +235,49 @@ const THUMBNAIL_FETCH_TIMEOUT_MS = Number.parseInt(process.env.THUMBNAIL_FETCH_T
 // one secret guards both server-to-server thumbnail endpoints.
 const IMAGE_THUMBNAIL_TIMEOUT_MS = Number.parseInt(process.env.IMAGE_THUMBNAIL_TIMEOUT_MS || '60000', 10);
 const IMAGE_THUMBNAIL_MAX_BYTES = Number.parseInt(process.env.IMAGE_THUMBNAIL_MAX_BYTES || String(25 * 1024 * 1024), 10);
+// SSRF mitigation: an allow-list, not a deny-list — reject every host that
+// isn't one of these before making any network call, rather than trying to
+// enumerate every private/internal address to block. Mirrors
+// IMAGE_THUMBNAIL_ALLOWED_HOSTS on skatehive-api (src/lib/spotmap-thumbnails.ts);
+// keep the two in sync by setting the SAME value in both services' env, not
+// just one. To extend: add the host here (comma-separated) and there.
+const IMAGE_THUMBNAIL_ALLOWED_HOSTS = (
+  process.env.IMAGE_THUMBNAIL_ALLOWED_HOSTS ||
+  'images.hive.blog,files.peakd.com,mymaps.usercontent.google.com,lh3.googleusercontent.com,ipfs.skatehive.app'
+).split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
+
+function isAllowedImageThumbnailUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'https:') return false;
+  return IMAGE_THUMBNAIL_ALLOWED_HOSTS.includes(parsed.hostname.toLowerCase());
+}
+
+// JPEG/PNG/WebP/GIF magic-byte signatures. Checked against the downloaded
+// file before it ever reaches ffmpeg — an allow-listed host is trusted to be
+// the right HOST, not to only ever serve images (or to not have been
+// compromised), so the content itself still gets verified.
+function sniffImageMagicBytes(filePath) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(12);
+    const bytesRead = fs.readSync(fd, buf, 0, 12, 0);
+    if (bytesRead >= 3 && buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return true; // JPEG
+    if (bytesRead >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return true; // PNG
+    if (bytesRead >= 4 && buf.toString('ascii', 0, 4) === 'GIF8') return true; // GIF
+    if (bytesRead >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return true; // WebP
+    return false;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+  }
+}
 
 if (!THUMBNAIL_SHARED_SECRET) {
   console.warn('⚠️  THUMBNAIL_SHARED_SECRET is not set — POST /thumbnail and POST /image-thumbnail will reject every request.');
@@ -293,7 +347,7 @@ app.get('/healthz', (req, res) => {
 // a browser/app upload. Its own capacity of 1, separate from /transcode.
 app.post('/thumbnail', express.json(), async (req, res) => {
   const provided = req.get('x-thumbnail-secret') || '';
-  if (!THUMBNAIL_SHARED_SECRET || provided !== THUMBNAIL_SHARED_SECRET) {
+  if (!THUMBNAIL_SHARED_SECRET || !timingSafeEqualSecret(provided, THUMBNAIL_SHARED_SECRET)) {
     return res.status(401).json({ ok: false, error: 'Unauthorized' });
   }
 
@@ -345,13 +399,15 @@ app.post('/thumbnail', express.json(), async (req, res) => {
 // of 1, 60s timeout covering both the download and the ffmpeg step.
 app.post('/image-thumbnail', express.json(), async (req, res) => {
   const provided = req.get('x-thumbnail-secret') || '';
-  if (!THUMBNAIL_SHARED_SECRET || provided !== THUMBNAIL_SHARED_SECRET) {
+  if (!THUMBNAIL_SHARED_SECRET || !timingSafeEqualSecret(provided, THUMBNAIL_SHARED_SECRET)) {
     return res.status(401).json({ ok: false, error: 'Unauthorized' });
   }
 
   const sourceUrl = String(req.body?.url || '').trim();
-  if (!sourceUrl || !/^https?:\/\//i.test(sourceUrl)) {
-    return res.status(400).json({ ok: false, error: 'Missing or invalid url' });
+  if (!sourceUrl || !isAllowedImageThumbnailUrl(sourceUrl)) {
+    // Rejected before any network call — SSRF allow-list, not a deny-list:
+    // only https URLs on IMAGE_THUMBNAIL_ALLOWED_HOSTS get past this point.
+    return res.status(400).json({ ok: false, error: 'url must be https and on the allowed host list' });
   }
   const requestedMaxPx = Number(req.body?.maxPx);
   const maxPx = Number.isFinite(requestedMaxPx) && requestedMaxPx > 0
@@ -367,10 +423,15 @@ app.post('/image-thumbnail', express.json(), async (req, res) => {
   let downloadedPath = null;
   let thumbPath = null;
   try {
-    downloadedPath = await downloadToTempFile(sourceUrl, IMAGE_THUMBNAIL_TIMEOUT_MS);
+    downloadedPath = await downloadToTempFile(sourceUrl, IMAGE_THUMBNAIL_TIMEOUT_MS, IMAGE_THUMBNAIL_MAX_BYTES);
     if (!downloadedPath) {
       console.warn(`⚠️ Image download failed for ${sourceUrl}`);
       return res.status(404).json({ ok: false, error: 'Could not download this image', url: sourceUrl });
+    }
+
+    if (!sniffImageMagicBytes(downloadedPath)) {
+      console.warn(`⚠️ Downloaded content is not a recognized image format: ${sourceUrl}`);
+      return res.status(400).json({ ok: false, error: 'Downloaded content is not a recognized image format', url: sourceUrl });
     }
 
     thumbPath = await generateImageThumbnail(downloadedPath, maxPx, IMAGE_THUMBNAIL_TIMEOUT_MS);
@@ -611,25 +672,51 @@ async function uploadThumbnailToPinata(thumbPath, creator) {
 }
 
 /**
- * Download an arbitrary image URL to a temp file. Used by POST
- * /image-thumbnail for sources ffmpeg can't be trusted to fetch directly
- * (Google My Maps hostedimage URLs etc. — unlike POST /thumbnail, which
- * hands ffmpeg a known-good Pinata gateway URL straight up).
+ * Download an arbitrary (allow-listed) image URL to a temp file. Used by
+ * POST /image-thumbnail for sources ffmpeg can't be trusted to fetch
+ * directly (Google My Maps hostedimage URLs etc. — unlike POST /thumbnail,
+ * which hands ffmpeg a known-good Pinata gateway URL straight up).
  * Returns the temp file path, or null on any failure.
+ *
+ * Two independent size/time guards beyond axios's own options, since axios
+ * does NOT enforce maxContentLength/maxBodyLength for responseType:'stream'
+ * (those only apply when axios buffers the response itself):
+ *  - byte count is tallied on every 'data' chunk and the stream is destroyed
+ *    the moment it crosses the cap, instead of trusting the response to stop.
+ *  - a wall-clock AbortController deadline fires regardless of ongoing
+ *    trickle activity, in addition to axios's `timeout` (which is closer to
+ *    an idle/inactivity timeout) — a slow-loris style drip feed could
+ *    otherwise stall the request indefinitely without ever going idle.
+ * maxRedirects: 0 — a redirect is treated as a failure, not followed; the
+ * allow-list check happened against the ORIGINAL url, and a redirect target
+ * could point anywhere.
  */
-async function downloadToTempFile(url, timeoutMs) {
+async function downloadToTempFile(url, timeoutMs, maxBytes) {
   const destPath = path.join(os.tmpdir(), `spot-img-${uuidv4()}`);
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await axios.get(url, {
       responseType: 'stream',
       timeout: timeoutMs,
-      maxContentLength: IMAGE_THUMBNAIL_MAX_BYTES,
-      maxBodyLength: IMAGE_THUMBNAIL_MAX_BYTES
+      maxRedirects: 0,
+      signal: controller.signal,
+      headers: { 'user-agent': 'skatehive-transcoder-image-thumb/1.0' }
     });
+    let received = 0;
+    let overLimit = false;
     await new Promise((resolve, reject) => {
       const writer = fs.createWriteStream(destPath);
+      response.data.on('data', (chunk) => {
+        received += chunk.length;
+        if (received > maxBytes && !overLimit) {
+          overLimit = true;
+          response.data.destroy(new Error('Response exceeds max allowed size'));
+          writer.destroy();
+        }
+      });
       response.data.pipe(writer);
-      writer.on('finish', resolve);
+      writer.on('finish', () => { if (!overLimit) resolve(); });
       writer.on('error', reject);
       response.data.on('error', reject);
     });
@@ -637,6 +724,8 @@ async function downloadToTempFile(url, timeoutMs) {
   } catch (err) {
     try { fs.unlinkSync(destPath); } catch {}
     return null;
+  } finally {
+    clearTimeout(deadline);
   }
 }
 
@@ -645,6 +734,12 @@ async function downloadToTempFile(url, timeoutMs) {
  * preserved) and re-encode as JPEG — one frame, no seeking (unlike
  * generateThumbnail, which is video-specific: -ss + duration-based capture
  * time). Returns the path to the thumbnail file, or null on failure/timeout.
+ *
+ * -nostdin: never wait on stdin (this runs unattended). -f image2
+ * -protocol_whitelist file: input is a local file we just downloaded and
+ * magic-byte-sniffed ourselves — this forbids ffmpeg from being tricked into
+ * opening anything else (a URL, a pipe) even if imagePath were ever
+ * attacker-influenced.
  */
 async function generateImageThumbnail(imagePath, maxPx, timeoutMs) {
   const thumbPath = path.join(os.tmpdir(), `img-thumb-${uuidv4()}.jpg`);
@@ -652,6 +747,9 @@ async function generateImageThumbnail(imagePath, maxPx, timeoutMs) {
   return new Promise((resolve) => {
     const proc = spawn('ffmpeg', [
       '-y',
+      '-nostdin',
+      '-f', 'image2',
+      '-protocol_whitelist', 'file',
       '-i', imagePath,
       '-vf', `scale='min(${maxPx},iw)':-2`,
       '-frames:v', '1',

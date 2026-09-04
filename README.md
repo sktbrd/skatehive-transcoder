@@ -61,23 +61,42 @@ from it), `502` (thumbnail generated but the Pinata upload failed), `503`
 
 ## Image thumbnails (`POST /image-thumbnail`)
 
-For skatehive-api's spotmap images feature: downscale an arbitrary image URL
-to a small (max ~400px) JPEG and pin it. Used for spot photos that aren't
+For skatehive-api's spotmap images feature: downscale an image URL to a
+small (max ~400px) JPEG and pin it. Used for spot photos that aren't
 Hive-hosted — images.hive.blog/files.peakd.com sources are resized for free
 via a URL path prefix on the API side and never hit this endpoint; Google My
-Maps hostedimage URLs (and anything else) come through here instead, since
-they accept no size parameter and 400 if you add one.
+Maps hostedimage URLs (and similar) come through here instead, since they
+accept no size parameter and 400 if you add one.
+
+**Not an open fetch proxy** — `url` must resolve to a host on an allow-list
+(`IMAGE_THUMBNAIL_ALLOWED_HOSTS`), checked before any network call:
 
 - Same **shared secret** as `POST /thumbnail` (`x-thumbnail-secret` /
-  `THUMBNAIL_SHARED_SECRET`) — one secret guards both server-to-server
-  thumbnail endpoints.
+  `THUMBNAIL_SHARED_SECRET`, compared with `crypto.timingSafeEqual`) — one
+  secret guards both server-to-server thumbnail endpoints.
+- `url` must be **https** and its hostname must be on
+  `IMAGE_THUMBNAIL_ALLOWED_HOSTS` (env, comma-separated; default
+  `images.hive.blog,files.peakd.com,mymaps.usercontent.google.com,
+  lh3.googleusercontent.com,ipfs.skatehive.app`) — an allow-list, not a
+  deny-list: anything not on it 400s before a single byte is fetched. To add
+  a host, set the same value here and on skatehive-api's
+  `IMAGE_THUMBNAIL_ALLOWED_HOSTS` — the two lists must match.
 - Its own capacity of **1**, separate from both `/transcode` and
   `/thumbnail`'s semaphores.
 - Downloads the source image to a temp file first (unlike `/thumbnail`,
-  which hands ffmpeg a known-good Pinata gateway URL directly — arbitrary
-  URLs aren't trusted the same way), then `ffmpeg -i <file> -vf
-  "scale='min(maxPx,iw)':-2" -frames:v 1` to JPEG. A 60s timeout covers each
-  of the download and the ffmpeg step.
+  which hands ffmpeg a known-good Pinata gateway URL directly). No
+  redirects are followed (`maxRedirects: 0`) — a 3xx is a failure, since the
+  allow-list check only covers the URL that was actually validated. The
+  response is capped at `IMAGE_THUMBNAIL_MAX_BYTES` (byte-counted as it
+  streams in, not just an axios option — those don't apply to streamed
+  responses) and bounded by a hard wall-clock deadline in addition to the
+  idle timeout (a slow trickle can't stall the request indefinitely). The
+  downloaded file is magic-byte-sniffed (JPEG/PNG/WebP/GIF) before ffmpeg
+  ever sees it — an allow-listed host is trusted to be the right *host*, not
+  to only ever serve images.
+- `ffmpeg -nostdin -f image2 -protocol_whitelist file -i <file> -vf
+  "scale='min(maxPx,iw)':-2" -frames:v 1` to JPEG — the protocol whitelist
+  keeps ffmpeg confined to reading the local file we already validated.
 
 **Request**
 ```bash
@@ -92,10 +111,12 @@ curl -X POST https://minivlad.tail83ea3e.ts.net/video/image-thumbnail \
 { "url": "https://ipfs.skatehive.app/ipfs/bafy..." }
 ```
 
-On failure: `401` (bad/missing secret), `400` (missing/malformed `url`),
-`404` (couldn't download the image, or ffmpeg couldn't read it), `502`
-(thumbnail generated but the Pinata upload failed), `503` (another image
-thumbnail job is already in flight — retry shortly).
+On failure: `401` (bad/missing secret), `400` (missing/malformed `url`, not
+https, host not on the allow-list, or the downloaded content isn't a
+recognized image format), `404` (couldn't download the image, a redirect,
+or ffmpeg couldn't read it), `502` (thumbnail generated but the Pinata
+upload failed), `503` (another image thumbnail job is already in flight —
+retry shortly).
 
 ## 🆕 Real-Time Progress Streaming (SSE)
 
@@ -224,6 +245,7 @@ curl http://localhost:8080/stats
 - `THUMBNAIL_FETCH_TIMEOUT_MS` (optional) — kill timeout for the gateway-fetch + ffmpeg step in `POST /thumbnail`, default `60000` (60s).
 - `IMAGE_THUMBNAIL_TIMEOUT_MS` (optional) — timeout for each of the download and ffmpeg steps in `POST /image-thumbnail`, default `60000` (60s). Uses the same `THUMBNAIL_SHARED_SECRET` as `POST /thumbnail`.
 - `IMAGE_THUMBNAIL_MAX_BYTES` (optional) — max download size for `POST /image-thumbnail`, default `26214400` (25MB).
+- `IMAGE_THUMBNAIL_ALLOWED_HOSTS` (optional) — comma-separated SSRF allow-list for `POST /image-thumbnail`'s `url`, default `images.hive.blog,files.peakd.com,mymaps.usercontent.google.com,lh3.googleusercontent.com,ipfs.skatehive.app`. Must match skatehive-api's `IMAGE_THUMBNAIL_ALLOWED_HOSTS` — set the same value on both, not just one.
 
 ## Production Deployment (Mac Mini M4)
 
