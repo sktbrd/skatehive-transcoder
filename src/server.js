@@ -143,6 +143,11 @@ const FFMPEG_TIMEOUT_MS = Number.parseInt(process.env.FFMPEG_TIMEOUT_MS || Strin
 // starve (or be starved by) real /transcode uploads.
 const activeThumbnailJobs = new Set(); // cid -> in progress
 
+// Spotmap images: image-thumbnail jobs get their own capacity of 1 too,
+// separate from both /transcode and /thumbnail — a burst of spotmap admin
+// edits (or the backfill script) can't starve or be starved by either.
+const activeImageThumbnailJobs = new Set(); // source url -> in progress
+
 function getCapacity() {
   return {
     active: activeProcessingJobs.size,
@@ -215,9 +220,13 @@ const PINATA_GROUP_VIDEOS = process.env.PINATA_GROUP_VIDEOS || null;
 // caller (skatehive-api) must send the same value as x-thumbnail-secret.
 const THUMBNAIL_SHARED_SECRET = process.env.THUMBNAIL_SHARED_SECRET || '';
 const THUMBNAIL_FETCH_TIMEOUT_MS = Number.parseInt(process.env.THUMBNAIL_FETCH_TIMEOUT_MS || '60000', 10);
+// Spotmap images: same shared secret as POST /thumbnail (THUMBNAIL_SHARED_SECRET) —
+// one secret guards both server-to-server thumbnail endpoints.
+const IMAGE_THUMBNAIL_TIMEOUT_MS = Number.parseInt(process.env.IMAGE_THUMBNAIL_TIMEOUT_MS || '60000', 10);
+const IMAGE_THUMBNAIL_MAX_BYTES = Number.parseInt(process.env.IMAGE_THUMBNAIL_MAX_BYTES || String(25 * 1024 * 1024), 10);
 
 if (!THUMBNAIL_SHARED_SECRET) {
-  console.warn('⚠️  THUMBNAIL_SHARED_SECRET is not set — POST /thumbnail will reject every request.');
+  console.warn('⚠️  THUMBNAIL_SHARED_SECRET is not set — POST /thumbnail and POST /image-thumbnail will reject every request.');
 }
 
 if (!PINATA_JWT) {
@@ -268,6 +277,11 @@ app.get('/healthz', (req, res) => {
       active: activeThumbnailJobs.size,
       max: 1,
       available: activeThumbnailJobs.size >= 1 ? 0 : 1
+    },
+    imageThumbnailCapacity: {
+      active: activeImageThumbnailJobs.size,
+      max: 1,
+      available: activeImageThumbnailJobs.size >= 1 ? 0 : 1
     }
   };
   sendHealth(req, res, payload, 'Video Worker Health');
@@ -320,6 +334,66 @@ app.post('/thumbnail', express.json(), async (req, res) => {
     return res.status(500).json({ ok: false, error: 'Thumbnail job failed', cid });
   } finally {
     activeThumbnailJobs.delete(cid);
+    if (thumbPath) { try { fs.unlinkSync(thumbPath); } catch {} }
+  }
+});
+
+// Spotmap images: downscale an arbitrary image URL (Google My Maps
+// hostedimage URLs mainly — they accept no size parameter and 400 if you add
+// one, unlike images.hive.blog, which resizes those for free and never needs
+// this endpoint). Same shared-secret auth as POST /thumbnail, own capacity
+// of 1, 60s timeout covering both the download and the ffmpeg step.
+app.post('/image-thumbnail', express.json(), async (req, res) => {
+  const provided = req.get('x-thumbnail-secret') || '';
+  if (!THUMBNAIL_SHARED_SECRET || provided !== THUMBNAIL_SHARED_SECRET) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  }
+
+  const sourceUrl = String(req.body?.url || '').trim();
+  if (!sourceUrl || !/^https?:\/\//i.test(sourceUrl)) {
+    return res.status(400).json({ ok: false, error: 'Missing or invalid url' });
+  }
+  const requestedMaxPx = Number(req.body?.maxPx);
+  const maxPx = Number.isFinite(requestedMaxPx) && requestedMaxPx > 0
+    ? Math.min(Math.round(requestedMaxPx), 1000)
+    : 400;
+
+  if (activeImageThumbnailJobs.size >= 1) {
+    return res.status(503).json({ ok: false, error: 'Image thumbnail worker busy, try again shortly', url: sourceUrl });
+  }
+
+  activeImageThumbnailJobs.add(sourceUrl);
+  const startTime = Date.now();
+  let downloadedPath = null;
+  let thumbPath = null;
+  try {
+    downloadedPath = await downloadToTempFile(sourceUrl, IMAGE_THUMBNAIL_TIMEOUT_MS);
+    if (!downloadedPath) {
+      console.warn(`⚠️ Image download failed for ${sourceUrl}`);
+      return res.status(404).json({ ok: false, error: 'Could not download this image', url: sourceUrl });
+    }
+
+    thumbPath = await generateImageThumbnail(downloadedPath, maxPx, IMAGE_THUMBNAIL_TIMEOUT_MS);
+    if (!thumbPath) {
+      console.warn(`⚠️ Image thumbnail generation failed for ${sourceUrl}`);
+      return res.status(404).json({ ok: false, error: 'Could not generate a thumbnail for this image', url: sourceUrl });
+    }
+
+    const thumbnailUrl = await uploadThumbnailToPinata(thumbPath, 'spotmap');
+    thumbPath = null; // uploadThumbnailToPinata always cleans up the file itself, success or failure
+
+    if (!thumbnailUrl) {
+      return res.status(502).json({ ok: false, error: 'Thumbnail generated but the Pinata upload failed', url: sourceUrl });
+    }
+
+    console.log(`✅ Image thumbnail ready for ${sourceUrl} in ${Date.now() - startTime}ms`);
+    return res.json({ url: thumbnailUrl });
+  } catch (err) {
+    console.error(`⚠️ Image thumbnail job failed for ${sourceUrl}:`, err.message || err);
+    return res.status(500).json({ ok: false, error: 'Image thumbnail job failed', url: sourceUrl });
+  } finally {
+    activeImageThumbnailJobs.delete(sourceUrl);
+    if (downloadedPath) { try { fs.unlinkSync(downloadedPath); } catch {} }
     if (thumbPath) { try { fs.unlinkSync(thumbPath); } catch {} }
   }
 });
@@ -534,6 +608,80 @@ async function uploadThumbnailToPinata(thumbPath, creator) {
     // Cleanup thumbnail file
     try { fs.unlinkSync(thumbPath); } catch {}
   }
+}
+
+/**
+ * Download an arbitrary image URL to a temp file. Used by POST
+ * /image-thumbnail for sources ffmpeg can't be trusted to fetch directly
+ * (Google My Maps hostedimage URLs etc. — unlike POST /thumbnail, which
+ * hands ffmpeg a known-good Pinata gateway URL straight up).
+ * Returns the temp file path, or null on any failure.
+ */
+async function downloadToTempFile(url, timeoutMs) {
+  const destPath = path.join(os.tmpdir(), `spot-img-${uuidv4()}`);
+  try {
+    const response = await axios.get(url, {
+      responseType: 'stream',
+      timeout: timeoutMs,
+      maxContentLength: IMAGE_THUMBNAIL_MAX_BYTES,
+      maxBodyLength: IMAGE_THUMBNAIL_MAX_BYTES
+    });
+    await new Promise((resolve, reject) => {
+      const writer = fs.createWriteStream(destPath);
+      response.data.pipe(writer);
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+      response.data.on('error', reject);
+    });
+    return destPath;
+  } catch (err) {
+    try { fs.unlinkSync(destPath); } catch {}
+    return null;
+  }
+}
+
+/**
+ * Downscale a still image to at most maxPx wide (height auto, aspect
+ * preserved) and re-encode as JPEG — one frame, no seeking (unlike
+ * generateThumbnail, which is video-specific: -ss + duration-based capture
+ * time). Returns the path to the thumbnail file, or null on failure/timeout.
+ */
+async function generateImageThumbnail(imagePath, maxPx, timeoutMs) {
+  const thumbPath = path.join(os.tmpdir(), `img-thumb-${uuidv4()}.jpg`);
+
+  return new Promise((resolve) => {
+    const proc = spawn('ffmpeg', [
+      '-y',
+      '-i', imagePath,
+      '-vf', `scale='min(${maxPx},iw)':-2`,
+      '-frames:v', '1',
+      '-q:v', '4',
+      thumbPath
+    ]);
+
+    let timedOut = false;
+    const timeoutId = timeoutMs
+      ? setTimeout(() => {
+          timedOut = true;
+          proc.kill('SIGKILL');
+        }, timeoutMs)
+      : null;
+
+    proc.on('close', (code) => {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (!timedOut && code === 0 && fs.existsSync(thumbPath)) {
+        resolve(thumbPath);
+      } else {
+        try { fs.unlinkSync(thumbPath); } catch {}
+        resolve(null);
+      }
+    });
+
+    proc.on('error', () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      resolve(null);
+    });
+  });
 }
 
 // Get video duration using ffprobe

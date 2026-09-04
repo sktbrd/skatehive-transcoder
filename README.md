@@ -7,6 +7,7 @@ A tiny API that accepts a file upload, transcodes it to MP4 (H.264/AAC) with FFm
 - `GET /healthz` — health check
 - `POST /transcode` — multipart/form-data with a single field named `video`
 - `POST /thumbnail` — grab a thumbnail for an existing IPFS CID (see below)
+- `POST /image-thumbnail` — downscale an arbitrary image URL (spotmap admin images, see below)
 - `GET /progress/:requestId` — **SSE (Server-Sent Events)** for real-time progress streaming
 - `GET /logs` — get recent transcode operations (JSON)
 - `GET /stats` — get transcoding statistics (JSON)
@@ -57,6 +58,44 @@ On failure: `401` (bad/missing secret), `400` (missing/malformed `cid`),
 `404` (the gateway wouldn't serve this CID, or ffmpeg couldn't grab a frame
 from it), `502` (thumbnail generated but the Pinata upload failed), `503`
 (another thumbnail job is already in flight — retry shortly).
+
+## Image thumbnails (`POST /image-thumbnail`)
+
+For skatehive-api's spotmap images feature: downscale an arbitrary image URL
+to a small (max ~400px) JPEG and pin it. Used for spot photos that aren't
+Hive-hosted — images.hive.blog/files.peakd.com sources are resized for free
+via a URL path prefix on the API side and never hit this endpoint; Google My
+Maps hostedimage URLs (and anything else) come through here instead, since
+they accept no size parameter and 400 if you add one.
+
+- Same **shared secret** as `POST /thumbnail` (`x-thumbnail-secret` /
+  `THUMBNAIL_SHARED_SECRET`) — one secret guards both server-to-server
+  thumbnail endpoints.
+- Its own capacity of **1**, separate from both `/transcode` and
+  `/thumbnail`'s semaphores.
+- Downloads the source image to a temp file first (unlike `/thumbnail`,
+  which hands ffmpeg a known-good Pinata gateway URL directly — arbitrary
+  URLs aren't trusted the same way), then `ffmpeg -i <file> -vf
+  "scale='min(maxPx,iw)':-2" -frames:v 1` to JPEG. A 60s timeout covers each
+  of the download and the ffmpeg step.
+
+**Request**
+```bash
+curl -X POST https://minivlad.tail83ea3e.ts.net/video/image-thumbnail \
+  -H "content-type: application/json" \
+  -H "x-thumbnail-secret: $THUMBNAIL_SHARED_SECRET" \
+  -d '{"url":"https://mymaps.usercontent.google.com/...","maxPx":400}'
+```
+
+**Response**
+```json
+{ "url": "https://ipfs.skatehive.app/ipfs/bafy..." }
+```
+
+On failure: `401` (bad/missing secret), `400` (missing/malformed `url`),
+`404` (couldn't download the image, or ffmpeg couldn't read it), `502`
+(thumbnail generated but the Pinata upload failed), `503` (another image
+thumbnail job is already in flight — retry shortly).
 
 ## 🆕 Real-Time Progress Streaming (SSE)
 
@@ -183,6 +222,8 @@ curl http://localhost:8080/stats
 - `NODE_ENV` — Environment mode (`development` or `production`).
 - `THUMBNAIL_SHARED_SECRET` (required for `POST /thumbnail`) — must match skatehive-api's `THUMBNAIL_SHARED_SECRET`. The route rejects every request (401) until this is set.
 - `THUMBNAIL_FETCH_TIMEOUT_MS` (optional) — kill timeout for the gateway-fetch + ffmpeg step in `POST /thumbnail`, default `60000` (60s).
+- `IMAGE_THUMBNAIL_TIMEOUT_MS` (optional) — timeout for each of the download and ffmpeg steps in `POST /image-thumbnail`, default `60000` (60s). Uses the same `THUMBNAIL_SHARED_SECRET` as `POST /thumbnail`.
+- `IMAGE_THUMBNAIL_MAX_BYTES` (optional) — max download size for `POST /image-thumbnail`, default `26214400` (25MB).
 
 ## Production Deployment (Mac Mini M4)
 
